@@ -2,7 +2,7 @@ name: Deploy StartSmall to Pages
 
 on:
   push:
-      branches: ["main"]
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -16,63 +16,64 @@ concurrency:
 
 jobs:
   build:
-      runs-on: ubuntu-latest
-      steps:
-        - name: Checkout
-          uses: actions/checkout@v4
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-        - name: Setup Pages
-          uses: actions/configure-pages@v5
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
 
-        - name: Generate site
-          shell: bash
-          run: |
-            rm -rf _site
-            mkdir -p _site
-            cp CNAME _site/CNAME
-            cp sheet-snapshots/google-sheet.csv _site/google-sheet.csv
-            python3 - <<'PY'
-            import csv
-            import html
-            from pathlib import Path
+      - name: Generate site
+        shell: bash
+        run: |
+          rm -rf _site
+          mkdir -p _site
+          cp CNAME _site/CNAME
+          cp sheet-snapshots/google-sheet.csv _site/google-sheet.csv
+          python3 - <<'PY'
+          import csv
+          import html
+          from pathlib import Path
 
-            rows = list(csv.reader(Path('sheet-snapshots/google-sheet.csv').read_text(encoding='utf-8').splitlines()))
-            out = [
-                '<!doctype html>',
-                '<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
-                '<title>StartSmall</title>',
-                '<style>',
-                'body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:24px;line-height:1.4}',
-                'table{border-collapse:collapse;width:100%;font-size:14px}',
-                'th,td{border:1px solid #d0d7de;padding:8px;vertical-align:top;text-align:left}',
-                'th{background:#f6f8fa;position:sticky;top:0}',
-                '.rownum{background:#f6f8fa;width:64px;white-space:nowrap}',
-                '.wrap{overflow-x:auto}',
-                '</style></head><body>',
-                '<h1>StartSmall Sheet Snapshot</h1>',
-                '<p>Source: <a href="https://docs.google.com/spreadsheets/d/1-eGxq2mMoEGwgSpNVL5j2sa6ToojZUZ-Zun8h2oBAR4/edit?gid=0#gid=0">Google Sheet</a></p>',
-                '<div class="wrap"><table>',
-            ]
-            for i, row in enumerate(rows, 1):
-                out.append('<tr><th class="rownum">%d</th>' % i)
-                out.extend('<td>%s</td>' % html.escape(cell) for cell in row)
-                out.append('</tr>')
-            out.append('</table></div></body></html>')
-            Path('_site/index.html').write_text(''.join(out), encoding='utf-8')
-            Path('_site/.nojekyll').write_text('', encoding='utf-8')
-            PY
+          rows = list(csv.reader(Path('sheet-snapshots/google-sheet.csv').read_text(encoding='utf-8').splitlines()))
+          out = [
+              '<!doctype html>',
+              '<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+              '<title>StartSmall</title>',
+              '<style>',
+              'body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:24px;line-height:1.4}',
+              'table{border-collapse:collapse;width:100%;font-size:14px}',
+              'th,td{border:1px solid #d0d7de;padding:8px;vertical-align:top;text-align:left}',
+              'th{background:#f6f8fa;position:sticky;top:0}',
+              '.rownum{background:#f6f8fa;width:64px;white-space:nowrap}',
+              '.wrap{overflow-x:auto}',
+              '</style></head><body>',
+              '<h1>StartSmall Sheet Snapshot</h1>',
+              '<p>Source: <a href="https://docs.google.com/spreadsheets/d/1-eGxq2mMoEGwgSpNVL5j2sa6ToojZUZ-Zun8h2oBAR4/edit?gid=0#gid=0">Google Sheet</a></p>',
+              '<div class="wrap"><table>',
+          ]
+          for i, row in enumerate(rows, 1):
+              out.append('<tr><th class="rownum">%d</th>' % i)
+              out.extend('<td>%s</td>' % html.escape(cell) for cell in row)
+              out.append('</tr>')
+          out.append('</table></div></body></html>')
+          Path('_site/index.html').write_text(''.join(out), encoding='utf-8')
+          Path('_site/.nojekyll').write_text('', encoding='utf-8')
+          PY
 
-        - name: Upload artifact
-          uses: actions/upload-pages-artifact@v3
-          with:
-            path: _site
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
 
   deploy:
-      environment:
-        name: github-pages
-        url: ${{ steps.deployment.outputs.page_url }}
-      runs-on: ubuntu-latest
-      steps:
-        - id: deployment
-          name: Deploy to GitHub Pages
-          uses: actions/deploy-pages@v5
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v5
