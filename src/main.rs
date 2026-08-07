@@ -114,6 +114,10 @@ fn sync_once(sheet_url: &str, privkey: Option<&str>) -> Result<(), Box<dyn Error
         println!("Nostr event: {}", event_id);
     }
 
+    if let Some(event_id) = result.nip34_event_id.as_deref() {
+        println!("NIP-34 event: {}", event_id);
+    }
+
     if result.changed {
         println!("Committed snapshot to git.");
     } else {
@@ -135,6 +139,7 @@ struct SyncResult {
     commit_id: String,
     changed: bool,
     nostr_event_id: Option<String>,
+    nip34_event_id: Option<String>,
 }
 
 fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn Error + Send + Sync>> {
@@ -149,9 +154,12 @@ fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn
     fs::write(workdir.join(SNAPSHOT_META), snapshot.meta.as_bytes())?;
 
     let commit = commit_snapshot(&repo)?;
-    let nostr_event_id = match privkey {
-        Some(privkey) => Some(publish_nostr_note(privkey, &snapshot, &commit.commit_id, url)?),
-        None => None,
+    let (nostr_event_id, nip34_event_id) = match privkey {
+        Some(privkey) => (
+            Some(publish_nostr_note(privkey, &snapshot, &commit.commit_id, url)?),
+            Some(publish_nip34_repo_announcement(privkey, &repo)?),
+        ),
+        None => (None, None),
     };
 
     Ok(SyncResult {
@@ -159,6 +167,7 @@ fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn
         commit_id: commit.commit_id,
         changed: commit.changed,
         nostr_event_id,
+        nip34_event_id,
     })
 }
 
@@ -181,6 +190,91 @@ fn fetch_snapshot(url: &str) -> Result<Snapshot, Box<dyn Error + Send + Sync>> {
         rows,
         sha256,
     })
+}
+
+fn publish_nip34_repo_announcement(
+    privkey: &str,
+    repo: &Repository,
+) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let keys = Keys::parse(privkey)?;
+    let announcement = GitRepositoryAnnouncement {
+        id: "startsmall".to_string(),
+        name: Some("StartSmall".to_string()),
+        description: Some("Google Sheet snapshot viewer and git sync".to_string()),
+        web: resolve_web_urls(repo),
+        clone: resolve_clone_urls(repo),
+        relays: resolve_relay_urls(),
+        euc: None,
+        maintainers: Vec::new(),
+    };
+    let event = announcement.into_event_builder().finalize(&keys)?;
+    let relays = resolve_relays();
+
+    let runtime = Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let client = Client::new();
+        for relay in relays {
+            client.add_relay(relay).await?;
+        }
+        client.connect().await;
+        client.send_event(&event).await?;
+        Ok::<String, Box<dyn Error + Send + Sync>>(event.id.to_string())
+    })
+}
+
+fn resolve_web_urls(repo: &Repository) -> Vec<Url> {
+    let mut urls = Vec::new();
+
+    if let Some(workdir) = repo.workdir() {
+        let cname = workdir.join("CNAME");
+        if let Ok(domain) = fs::read_to_string(cname) {
+            let domain = domain.trim();
+            if !domain.is_empty() {
+                if let Ok(url) = Url::parse(&format!("https://{domain}")) {
+                    urls.push(url);
+                }
+            }
+        }
+    }
+
+    urls
+}
+
+fn resolve_clone_urls(repo: &Repository) -> Vec<Url> {
+    let mut urls = Vec::new();
+
+    if let Ok(remote) = repo.find_remote("origin") {
+        if let Some(url) = remote.url().and_then(normalize_clone_url) {
+            if let Ok(parsed) = Url::parse(&url) {
+                urls.push(parsed);
+            }
+        }
+    }
+
+    urls
+}
+
+fn resolve_relay_urls() -> Vec<RelayUrl> {
+    resolve_relays()
+        .into_iter()
+        .filter_map(|relay| RelayUrl::parse(&relay).ok())
+        .collect()
+}
+
+fn normalize_clone_url(remote: &str) -> Option<String> {
+    if remote.starts_with("http://") || remote.starts_with("https://") {
+        return Some(remote.trim_end_matches(".git").to_string());
+    }
+
+    if let Some(rest) = remote.strip_prefix("git@github.com:") {
+        return Some(format!("https://github.com/{}", rest.trim_end_matches(".git")));
+    }
+
+    if let Some(rest) = remote.strip_prefix("ssh://git@github.com/") {
+        return Some(format!("https://github.com/{}", rest.trim_end_matches(".git")));
+    }
+
+    None
 }
 
 struct CommitResult {
@@ -332,12 +426,17 @@ fn render_sync_page(result: &SyncResult) -> String {
         .as_deref()
         .map(|id| format!("<p>Nostr event: <code>{}</code></p>", escape_html(id)))
         .unwrap_or_default();
+    let nip34 = result
+        .nip34_event_id
+        .as_deref()
+        .map(|id| format!("<p>NIP-34 event: <code>{}</code></p>", escape_html(id)))
+        .unwrap_or_default();
 
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Synced</title></head>\
          <body><h1>Snapshot synced</h1><p>Commit: <code>{}</code></p>\
          <p>SHA-256: <code>{}</code></p>\
-         <p>Rows: {}</p>{nostr}\
+         <p>Rows: {}</p>{nostr}{nip34}\
          <p><a href=\"/\">Back</a></p></body></html>",
         escape_html(&result.commit_id),
         escape_html(&result.snapshot.sha256),
