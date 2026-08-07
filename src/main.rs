@@ -153,7 +153,12 @@ fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn
     fs::write(workdir.join(SNAPSHOT_CSV), &snapshot.csv)?;
     fs::write(workdir.join(SNAPSHOT_META), snapshot.meta.as_bytes())?;
 
-    let commit = commit_snapshot(&repo)?;
+    let commit_message = format!(
+        "sync: snapshot Google Sheet document\n\nsha256: {}\nrows: {}\nsource: {}\nfile: {}\nmeta: {}",
+        snapshot.sha256, snapshot.rows, url, SNAPSHOT_CSV, SNAPSHOT_META
+    );
+
+    let commit = commit_snapshot(&repo, &commit_message)?;
     let (nostr_event_id, nip34_event_id) = match privkey {
         Some(privkey) => (
             Some(publish_nostr_note(privkey, &snapshot, &commit.commit_id, url)?),
@@ -282,7 +287,7 @@ struct CommitResult {
     changed: bool,
 }
 
-fn commit_snapshot(repo: &Repository) -> Result<CommitResult, Box<dyn Error + Send + Sync>> {
+fn commit_snapshot(repo: &Repository, message: &str) -> Result<CommitResult, Box<dyn Error + Send + Sync>> {
     let mut index = repo.index()?;
     index.add_path(Path::new(SNAPSHOT_CSV))?;
     index.add_path(Path::new(SNAPSHOT_META))?;
@@ -305,7 +310,7 @@ fn commit_snapshot(repo: &Repository) -> Result<CommitResult, Box<dyn Error + Se
             Some("HEAD"),
             &signature,
             &signature,
-            "sync: snapshot Google Sheet document",
+            message,
             &tree,
             &[&parent],
         )?;
@@ -318,7 +323,7 @@ fn commit_snapshot(repo: &Repository) -> Result<CommitResult, Box<dyn Error + Se
             Some("HEAD"),
             &signature,
             &signature,
-            "sync: snapshot Google Sheet document",
+            message,
             &tree,
             &[],
         )?;
