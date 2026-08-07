@@ -389,6 +389,7 @@ fn render_sheet_html(url: &str) -> Result<String, Box<dyn Error + Send + Sync>> 
 }
 
 fn render_sheet_page(rows: &[csv::StringRecord]) -> String {
+    let parsed = parse_sheet(rows);
     let mut html = String::from(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -400,17 +401,52 @@ fn render_sheet_page(rows: &[csv::StringRecord]) -> String {
          th{background:#f6f8fa;position:sticky;top:0}\
          .rownum{background:#f6f8fa;width:64px;white-space:nowrap;font-variant-numeric:tabular-nums}\
          .wrap{overflow-x:auto}\
+         .meta{margin:0 0 16px 0}\
+         .field{color:#57606a;font-size:12px;margin-left:6px}\
+         .cell-link{text-decoration:none;color:#0969da}\
          .actions{margin:0 0 16px 0}\
          button{padding:8px 12px;border:1px solid #d0d7de;background:#f6f8fa;border-radius:6px;cursor:pointer}\
          </style></head><body><h1>Spreadsheet Viewer</h1><div class=\"actions\"><form method=\"post\" action=\"/sync\"><button type=\"submit\">Sync snapshot to git</button></form></div><div class=\"wrap\"><table>",
     );
 
-    for (index, row) in rows.iter().enumerate() {
+    if !parsed.metadata_rows.is_empty() {
+        html.push_str("</table></div><div class=\"meta\"><table>");
+        for row in parsed.metadata_rows {
+            html.push_str("<tr>");
+            for cell in row {
+                html.push_str("<td>");
+                html.push_str(&escape_html(&cell));
+                html.push_str("</td>");
+            }
+            html.push_str("</tr>");
+        }
+        html.push_str("</table></div><div class=\"wrap\"><table>");
+    }
+
+    if !parsed.headers.is_empty() {
+        html.push_str("<tr>");
+        html.push_str("<th class=\"rownum\">#</th>");
+        for header in &parsed.headers {
+            let (label, field) = annotate_header(header);
+            html.push_str("<th>");
+            html.push_str(&escape_html(&label));
+            if let Some(field) = field {
+                html.push_str("<span class=\"field\">");
+                html.push_str(&escape_html(field));
+                html.push_str("</span>");
+            }
+            html.push_str("</th>");
+        }
+        html.push_str("</tr>");
+    }
+
+    for (index, row) in parsed.data_rows.iter().enumerate() {
         html.push_str("<tr>");
         html.push_str(&format!("<th class=\"rownum\">{}</th>", index + 1));
-        for cell in row.iter() {
+        for (col_index, cell) in row.iter().enumerate() {
             html.push_str("<td>");
-            html.push_str(&escape_html(cell));
+            let header = parsed.headers.get(col_index).map(String::as_str);
+            html.push_str(&render_cell(cell, header));
             html.push_str("</td>");
         }
         html.push_str("</tr>");
@@ -418,6 +454,177 @@ fn render_sheet_page(rows: &[csv::StringRecord]) -> String {
 
     html.push_str("</table></div></body></html>");
     html
+}
+
+struct ParsedSheet {
+    metadata_rows: Vec<Vec<String>>,
+    headers: Vec<String>,
+    data_rows: Vec<Vec<String>>,
+}
+
+fn parse_sheet(rows: &[csv::StringRecord]) -> ParsedSheet {
+    let mut metadata_rows = Vec::new();
+    let mut headers = Vec::new();
+    let mut data_rows = Vec::new();
+    let mut header_found = false;
+
+    for row in rows {
+        let cells: Vec<String> = row.iter().map(|cell| cell.trim().to_string()).collect();
+        if !header_found && is_header_row(&cells) {
+            headers = cells;
+            header_found = true;
+            continue;
+        }
+
+        if header_found {
+            if cells.iter().any(|cell| !cell.is_empty()) {
+                data_rows.push(cells);
+            }
+        } else if cells.iter().any(|cell| !cell.is_empty()) {
+            metadata_rows.push(cells);
+        }
+    }
+
+    ParsedSheet {
+        metadata_rows,
+        headers,
+        data_rows,
+    }
+}
+
+fn is_header_row(cells: &[String]) -> bool {
+    let keywords = ["date", "amount", "grantee", "twitter", "x", "link", "why", "domain", "url"];
+    let mut score = 0usize;
+
+    for cell in cells {
+        let lower = cell.to_lowercase();
+        if keywords.iter().any(|keyword| lower.contains(keyword)) {
+            score += 1;
+        }
+    }
+
+    score >= 2
+}
+
+fn annotate_header(header: &str) -> (String, Option<&'static str>) {
+    let lower = header.to_lowercase();
+    if lower.contains("twitter") || lower == "x" || lower.contains("x (twitter)") {
+        (header.to_string(), Some("twitter"))
+    } else if lower.contains("domain") {
+        (header.to_string(), Some("domain"))
+    } else if lower.contains("link") || lower.contains("url") || lower.contains("website") {
+        (header.to_string(), Some("url"))
+    } else {
+        (header.to_string(), None)
+    }
+}
+
+fn render_cell(value: &str, header: Option<&str>) -> String {
+    if let Some((label, href)) = detect_link(value, header) {
+        return format!(
+            "<a class=\"cell-link\" href=\"{}\" target=\"_blank\" rel=\"noreferrer\">{}</a>",
+            escape_html(&href),
+            escape_html(&label)
+        );
+    }
+
+    escape_html(value)
+}
+
+fn detect_link(value: &str, header: Option<&str>) -> Option<(String, String)> {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Some(url) = normalized_url(raw) {
+        let label = if header.map_or(false, |h| is_twitter_header(h)) {
+            twitter_label(raw)
+        } else {
+            raw.to_string()
+        };
+        return Some((label, url));
+    }
+
+    if header.map_or(false, |h| is_twitter_header(h)) {
+        let handle = twitter_handle(raw)?;
+        return Some((format!("@{handle}"), format!("https://x.com/{handle}")));
+    }
+
+    if header.map_or(false, |h| is_domain_header(h)) {
+        let domain = bare_domain(raw)?;
+        return Some((domain.to_string(), format!("https://{domain}")));
+    }
+
+    if let Some(domain) = bare_domain(raw) {
+        return Some((domain.to_string(), format!("https://{domain}")));
+    }
+
+    None
+}
+
+fn normalized_url(value: &str) -> Option<String> {
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Some(value.to_string());
+    }
+
+    if value.contains("twitter.com/") || value.contains("x.com/") {
+        let prefixed = if value.starts_with('@') {
+            format!("https://x.com/{}", value.trim_start_matches('@'))
+        } else {
+            format!("https://{}", value.trim_start_matches('/'))
+        };
+        return Some(prefixed);
+    }
+
+    None
+}
+
+fn is_twitter_header(header: &str) -> bool {
+    let lower = header.to_lowercase();
+    lower.contains("twitter") || lower == "x" || lower.contains("x (twitter)")
+}
+
+fn is_domain_header(header: &str) -> bool {
+    header.to_lowercase().contains("domain")
+}
+
+fn twitter_handle(value: &str) -> Option<&str> {
+    let trimmed = value.trim().trim_start_matches('@');
+    let trimmed = trimmed
+        .strip_prefix("https://x.com/")
+        .or_else(|| trimmed.strip_prefix("https://www.x.com/"))
+        .or_else(|| trimmed.strip_prefix("https://twitter.com/"))
+        .or_else(|| trimmed.strip_prefix("https://www.twitter.com/"))
+        .unwrap_or(trimmed);
+
+    let handle = trimmed.split('/').next()?.trim();
+    if handle.is_empty() {
+        None
+    } else {
+        Some(handle)
+    }
+}
+
+fn twitter_label(value: &str) -> String {
+    twitter_handle(value)
+        .map(|handle| format!("@{handle}"))
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn bare_domain(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let host = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+
+    let host = host.trim_start_matches("www.");
+    if host.contains('.') && !host.contains(' ') {
+        Some(host.split('/').next().unwrap_or(host))
+    } else {
+        None
+    }
 }
 
 fn render_sync_page(result: &SyncResult) -> String {
