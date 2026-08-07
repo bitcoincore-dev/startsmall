@@ -8,7 +8,7 @@ use tiny_http::{Header, Response, Server};
 
 const DEFAULT_SHEET_CSV_URL: &str = "https://docs.google.com/spreadsheets/d/1-eGxq2mMoEGwgSpNVL5j2sa6ToojZUZ-Zun8h2oBAR4/export?format=csv&gid=0";
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let sheet_url = env::var("SHEET_CSV_URL").unwrap_or_else(|_| DEFAULT_SHEET_CSV_URL.to_string());
     let addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
     let server = Server::http(&addr)?;
