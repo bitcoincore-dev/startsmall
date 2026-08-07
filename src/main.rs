@@ -10,10 +10,13 @@ const DEFAULT_SHEET_CSV_URL: &str = "https://docs.google.com/spreadsheets/d/1-eG
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let sheet_url = env::var("SHEET_CSV_URL").unwrap_or_else(|_| DEFAULT_SHEET_CSV_URL.to_string());
-    let addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:0".to_string());
     let server = Server::http(&addr)?;
 
-    println!("Serving spreadsheet viewer at http://{addr}");
+    match server.server_addr().to_ip() {
+        Some(listen_addr) => println!("Serving spreadsheet viewer at http://{listen_addr}"),
+        None => println!("Serving spreadsheet viewer on {addr}"),
+    }
     println!("Fetching data from {sheet_url}");
 
     for request in server.incoming_requests() {
