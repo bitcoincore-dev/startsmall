@@ -3,10 +3,12 @@ name: Deploy StartSmall to Pages
 on:
   push:
     branches: ["main"]
+  schedule:
+    - cron: "0 7 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -15,7 +17,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  sync:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "StartSmall Bot"
+          git config user.email "start-small-bot@example.com"
+
+      - name: Sync sheet snapshot
+        env:
+          SHEET_CSV_URL: https://docs.google.com/spreadsheets/d/1-eGxq2mMoEGwgSpNVL5j2sa6ToojZUZ-Zun8h2oBAR4/export?format=csv&gid=0
+        run: cargo run -- sync
+
+      - name: Push snapshot commit
+        run: git push origin HEAD:${{ github.ref_name }}
+
   build:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
