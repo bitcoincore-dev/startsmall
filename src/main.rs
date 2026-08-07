@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use csv::ReaderBuilder;
@@ -144,6 +145,7 @@ struct SyncResult {
 
 fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn Error + Send + Sync>> {
     let snapshot = fetch_snapshot(url)?;
+    let synced_at_unix_ns = synced_at_unix_ns();
     let repo = Repository::discover(".")?;
     let workdir = repo
         .workdir()
@@ -151,11 +153,14 @@ fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn
 
     fs::create_dir_all(workdir.join(SNAPSHOT_DIR))?;
     fs::write(workdir.join(SNAPSHOT_CSV), &snapshot.csv)?;
-    fs::write(workdir.join(SNAPSHOT_META), snapshot.meta.as_bytes())?;
+    fs::write(
+        workdir.join(SNAPSHOT_META),
+        format!("{}synced_at_unix_ns={}\n", snapshot.meta, synced_at_unix_ns),
+    )?;
 
     let commit_message = format!(
-        "sync: snapshot Google Sheet document\n\nsha256: {}\nrows: {}\nsource: {}\nfile: {}\nmeta: {}",
-        snapshot.sha256, snapshot.rows, url, SNAPSHOT_CSV, SNAPSHOT_META
+        "sync: snapshot Google Sheet document\n\nsha256: {}\nrows: {}\nsource: {}\nfile: {}\nmeta: {}\nsynced_at_unix_ns: {}",
+        snapshot.sha256, snapshot.rows, url, SNAPSHOT_CSV, SNAPSHOT_META, synced_at_unix_ns
     );
 
     let commit = commit_snapshot(&repo, &commit_message)?;
@@ -299,13 +304,6 @@ fn commit_snapshot(repo: &Repository, message: &str) -> Result<CommitResult, Box
 
     if let Ok(head) = repo.head() {
         let parent = head.peel_to_commit()?;
-        if parent.tree_id() == tree_id {
-            return Ok(CommitResult {
-                commit_id: parent.id().to_string(),
-                changed: false,
-            });
-        }
-
         let commit_id = repo.commit(
             Some("HEAD"),
             &signature,
@@ -332,6 +330,13 @@ fn commit_snapshot(repo: &Repository, message: &str) -> Result<CommitResult, Box
             changed: true,
         })
     }
+}
+
+fn synced_at_unix_ns() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
 }
 
 fn signature(repo: &Repository) -> Result<Signature<'_>, Box<dyn Error + Send + Sync>> {
