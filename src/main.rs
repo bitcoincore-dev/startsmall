@@ -1,102 +1,116 @@
 use std::env;
 use std::error::Error;
-use std::io::Cursor;
-use std::thread;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use csv::ReaderBuilder;
-use tiny_http::{Header, Response, Server};
+use git2::{IndexAddOption, Repository, Signature};
+use sha2::{Digest, Sha256};
 
 const DEFAULT_SHEET_CSV_URL: &str = "https://docs.google.com/spreadsheets/d/1-eGxq2mMoEGwgSpNVL5j2sa6ToojZUZ-Zun8h2oBAR4/export?format=csv&gid=0";
+const SNAPSHOT_DIR: &str = "sheet-snapshots";
+const SNAPSHOT_CSV: &str = "sheet-snapshots/google-sheet.csv";
+const SNAPSHOT_META: &str = "sheet-snapshots/google-sheet.meta";
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let sheet_url = env::var("SHEET_CSV_URL").unwrap_or_else(|_| DEFAULT_SHEET_CSV_URL.to_string());
-    let addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:0".to_string());
-    let server = Server::http(&addr)?;
+    let snapshot = fetch_snapshot(&sheet_url)?;
+    let repo = Repository::discover(".")?;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| "repository must not be bare".to_string())?;
 
-    match server.server_addr().to_ip() {
-        Some(listen_addr) => println!("Serving spreadsheet viewer at http://{listen_addr}"),
-        None => println!("Serving spreadsheet viewer on {addr}"),
-    }
-    println!("Fetching data from {sheet_url}");
+    let csv_path = workdir.join(SNAPSHOT_CSV);
+    let meta_path = workdir.join(SNAPSHOT_META);
 
-    for request in server.incoming_requests() {
-        let url = sheet_url.clone();
-        thread::spawn(move || {
-            let response = match fetch_sheet_html(&url) {
-                Ok(html) => html_response(html),
-                Err(err) => html_response(render_error_page(&err.to_string())),
-            };
+    fs::create_dir_all(workdir.join(SNAPSHOT_DIR))?;
+    fs::write(&csv_path, &snapshot.csv)?;
+    fs::write(&meta_path, snapshot.meta.as_bytes())?;
 
-            let _ = request.respond(response);
-        });
-    }
+    let commit_id = commit_snapshot(&repo, &[Path::new(SNAPSHOT_CSV), Path::new(SNAPSHOT_META)])?;
+
+    println!("Fetched {} rows from {}", snapshot.rows, sheet_url);
+    println!("Snapshot hash: {}", snapshot.sha256);
+    println!("Committed snapshot: {}", commit_id);
 
     Ok(())
 }
 
-fn fetch_sheet_html(url: &str) -> Result<String, Box<dyn Error>> {
-    let body = reqwest::blocking::get(url)?.error_for_status()?.text()?;
-    let mut reader = ReaderBuilder::new().has_headers(false).from_reader(Cursor::new(body));
-
-    let mut rows = Vec::new();
-    for record in reader.records() {
-        rows.push(record?);
-    }
-
-    Ok(render_sheet_page(&rows))
+struct Snapshot {
+    csv: String,
+    meta: String,
+    rows: usize,
+    sha256: String,
 }
 
-fn render_sheet_page(rows: &[csv::StringRecord]) -> String {
-    let mut html = String::from(
-        "<!doctype html><html><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Spreadsheet Viewer</title>\
-         <style>\
-         body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:24px;line-height:1.4}\
-         table{border-collapse:collapse;width:100%;font-size:14px}\
-         th,td{border:1px solid #d0d7de;padding:8px;vertical-align:top;text-align:left}\
-         th{background:#f6f8fa;position:sticky;top:0}\
-         .rownum{background:#f6f8fa;width:64px;white-space:nowrap;font-variant-numeric:tabular-nums}\
-         .wrap{overflow-x:auto}\
-         </style></head><body><h1>Spreadsheet Viewer</h1><div class=\"wrap\"><table>",
+fn fetch_snapshot(url: &str) -> Result<Snapshot, Box<dyn Error + Send + Sync>> {
+    let body = reqwest::blocking::get(url)?.error_for_status()?.text()?;
+    let mut reader = ReaderBuilder::new().has_headers(false).from_reader(body.as_bytes());
+
+    let mut rows = 0usize;
+    let mut digest = Sha256::new();
+    digest.update(body.as_bytes());
+
+    for record in reader.records() {
+        record?;
+        rows += 1;
+    }
+
+    let sha256 = format!("{:x}", digest.finalize());
+    let meta = format!(
+        "source_url={}\nsha256={}\nrows={}\n",
+        url, sha256, rows
     );
 
-    for (index, row) in rows.iter().enumerate() {
-        html.push_str("<tr>");
-        html.push_str(&format!("<th class=\"rownum\">{}</th>", index + 1));
-        for cell in row.iter() {
-            html.push_str("<td>");
-            html.push_str(&escape_html(cell));
-            html.push_str("</td>");
+    Ok(Snapshot {
+        csv: body,
+        meta,
+        rows,
+        sha256,
+    })
+}
+
+fn commit_snapshot(repo: &Repository, paths: &[&Path]) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let mut index = repo.index()?;
+    index.add_all(paths, IndexAddOption::DEFAULT, None)?;
+    index.write()?;
+
+    let tree_id = index.write_tree()?;
+    let tree = repo.find_tree(tree_id)?;
+    let signature = signature(repo)?;
+
+    if let Ok(head) = repo.head() {
+        let parent = head.peel_to_commit()?;
+        if parent.tree_id() == tree_id {
+            return Ok(parent.id().to_string());
         }
-        html.push_str("</tr>");
+
+        let commit_id = repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "sync: snapshot Google Sheet document",
+            &tree,
+            &[&parent],
+        )?;
+        Ok(commit_id.to_string())
+    } else {
+        let commit_id = repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "sync: snapshot Google Sheet document",
+            &tree,
+            &[],
+        )?;
+        Ok(commit_id.to_string())
+    }
+}
+
+fn signature(repo: &Repository) -> Result<Signature<'_>, Box<dyn Error + Send + Sync>> {
+    if let Ok(sig) = repo.signature() {
+        return Ok(sig);
     }
 
-    html.push_str("</table></div></body></html>");
-    html
-}
-
-fn render_error_page(message: &str) -> String {
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Error</title></head>\
-         <body><h1>Failed to load spreadsheet</h1><pre>{}</pre></body></html>",
-        escape_html(message)
-    )
-}
-
-fn html_response(body: String) -> Response<std::io::Cursor<Vec<u8>>> {
-    let mut response = Response::from_string(body);
-    if let Ok(header) = Header::from_bytes(b"Content-Type".as_slice(), b"text/html; charset=utf-8".as_slice()) {
-        response = response.with_header(header);
-    }
-    response
-}
-
-fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    Ok(Signature::now("Start Small Bot", "start-small-bot@example.com")?)
 }
