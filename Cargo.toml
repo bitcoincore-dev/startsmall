@@ -1,0 +1,9 @@
+[package]
+name = "start-small"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+csv = "1.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+tiny_http = "0.12"
