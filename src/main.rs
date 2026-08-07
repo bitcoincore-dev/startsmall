@@ -4,30 +4,74 @@ use std::fs;
 use std::path::Path;
 use std::thread;
 
+use clap::{Parser, ValueEnum};
 use csv::ReaderBuilder;
 use git2::{Repository, Signature};
+use nostr_sdk::prelude::*;
 use sha2::{Digest, Sha256};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
+use tokio::runtime::Builder;
 
 const DEFAULT_SHEET_CSV_URL: &str = "https://docs.google.com/spreadsheets/d/1-eGxq2mMoEGwgSpNVL5j2sa6ToojZUZ-Zun8h2oBAR4/export?format=csv&gid=0";
 const SNAPSHOT_DIR: &str = "sheet-snapshots";
 const SNAPSHOT_CSV: &str = "sheet-snapshots/google-sheet.csv";
 const SNAPSHOT_META: &str = "sheet-snapshots/google-sheet.meta";
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:0";
+const DEFAULT_RELAYS: [&str; 3] = [
+    "wss://relay.damus.io",
+    "wss://relay.nostr.band",
+    "wss://nostr.wine",
+];
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Sync and serve a Google Sheet snapshot")]
+struct Args {
+    #[arg(long, value_name = "URL")]
+    sheet_url: Option<String>,
+
+    #[arg(long, value_name = "ADDR")]
+    bind_addr: Option<String>,
+
+    #[arg(long, value_name = "NSEC_OR_HEX", help = "Nostr private key used to publish sync notes")]
+    privkey: Option<String>,
+
+    #[arg(value_enum, default_value_t = Mode::Serve)]
+    mode: Mode,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum Mode {
+    Serve,
+    Sync,
+}
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let sheet_url = env::var("SHEET_CSV_URL").unwrap_or_else(|_| DEFAULT_SHEET_CSV_URL.to_string());
+    let args = Args::parse();
+    let sheet_url = resolve_sheet_url(args.sheet_url);
 
-    match env::args().nth(1).as_deref() {
-        Some("sync") => sync_once(&sheet_url)?,
-        Some("serve") | None => serve(&sheet_url)?,
-        Some(mode) => return Err(format!("unknown mode: {mode}").into()),
+    match args.mode {
+        Mode::Sync => sync_once(&sheet_url, args.privkey.as_deref())?,
+        Mode::Serve => serve(&sheet_url, args.bind_addr.as_deref(), args.privkey.as_deref())?,
     }
 
     Ok(())
 }
 
-fn serve(sheet_url: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:0".to_string());
+fn resolve_sheet_url(value: Option<String>) -> String {
+    value
+        .or_else(|| env::var("SHEET_CSV_URL").ok())
+        .unwrap_or_else(|| DEFAULT_SHEET_CSV_URL.to_string())
+}
+
+fn resolve_bind_addr(value: Option<&str>) -> String {
+    value
+        .map(ToOwned::to_owned)
+        .or_else(|| env::var("BIND_ADDR").ok())
+        .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string())
+}
+
+fn serve(sheet_url: &str, bind_addr: Option<&str>, privkey: Option<&str>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let addr = resolve_bind_addr(bind_addr);
     let server = Server::http(&addr)?;
 
     match server.server_addr().to_ip() {
@@ -39,13 +83,14 @@ fn serve(sheet_url: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
 
     for request in server.incoming_requests() {
         let url = sheet_url.to_string();
+        let privkey = privkey.map(ToOwned::to_owned);
         thread::spawn(move || {
             let response = match (request.method(), request.url()) {
                 (&Method::Get, "/") => match render_sheet_html(&url) {
                     Ok(html) => html_response(html),
                     Err(err) => html_response(render_error_page(&err.to_string())),
                 },
-                (&Method::Post, "/sync") => match sync_snapshot(&url) {
+                (&Method::Post, "/sync") => match sync_snapshot(&url, privkey.as_deref()) {
                     Ok(result) => html_response(render_sync_page(&result)),
                     Err(err) => html_response(render_error_page(&err.to_string())),
                 },
@@ -59,16 +104,22 @@ fn serve(sheet_url: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-fn sync_once(sheet_url: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let result = sync_snapshot(sheet_url)?;
+fn sync_once(sheet_url: &str, privkey: Option<&str>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let result = sync_snapshot(sheet_url, privkey)?;
     println!("Fetched {} rows from {}", result.snapshot.rows, sheet_url);
     println!("Snapshot hash: {}", result.snapshot.sha256);
     println!("Commit: {}", result.commit_id);
+
+    if let Some(event_id) = result.nostr_event_id.as_deref() {
+        println!("Nostr event: {}", event_id);
+    }
+
     if result.changed {
         println!("Committed snapshot to git.");
     } else {
         println!("No content change; repository already matched the sheet.");
     }
+
     Ok(())
 }
 
@@ -83,9 +134,10 @@ struct SyncResult {
     snapshot: Snapshot,
     commit_id: String,
     changed: bool,
+    nostr_event_id: Option<String>,
 }
 
-fn sync_snapshot(url: &str) -> Result<SyncResult, Box<dyn Error + Send + Sync>> {
+fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn Error + Send + Sync>> {
     let snapshot = fetch_snapshot(url)?;
     let repo = Repository::discover(".")?;
     let workdir = repo
@@ -97,11 +149,16 @@ fn sync_snapshot(url: &str) -> Result<SyncResult, Box<dyn Error + Send + Sync>> 
     fs::write(workdir.join(SNAPSHOT_META), snapshot.meta.as_bytes())?;
 
     let commit = commit_snapshot(&repo)?;
+    let nostr_event_id = match privkey {
+        Some(privkey) => Some(publish_nostr_note(privkey, &snapshot, &commit.commit_id, url)?),
+        None => None,
+    };
 
     Ok(SyncResult {
         snapshot,
         commit_id: commit.commit_id,
         changed: commit.changed,
+        nostr_event_id,
     })
 }
 
@@ -186,6 +243,45 @@ fn signature(repo: &Repository) -> Result<Signature<'_>, Box<dyn Error + Send + 
     Ok(Signature::now("Start Small Bot", "start-small-bot@example.com")?)
 }
 
+fn publish_nostr_note(
+    privkey: &str,
+    snapshot: &Snapshot,
+    commit_id: &str,
+    source_url: &str,
+) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let keys = Keys::parse(privkey)?;
+    let content = format!(
+        "StartSmall snapshot synced\ncommit: {commit_id}\nsha256: {}\nrows: {}\nsource: {source_url}",
+        snapshot.sha256, snapshot.rows
+    );
+    let relays = resolve_relays();
+
+    let runtime = Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let client = Client::new();
+        for relay in relays {
+            client.add_relay(relay).await?;
+        }
+        client.connect().await;
+
+        let event = EventBuilder::new(Kind::TextNote, content).finalize(&keys)?;
+        client.send_event(&event).await?;
+        Ok::<String, Box<dyn Error + Send + Sync>>(event.id.to_string())
+    })
+}
+
+fn resolve_relays() -> Vec<String> {
+    match env::var("NOSTR_RELAYS") {
+        Ok(value) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|relay| !relay.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Err(_) => DEFAULT_RELAYS.iter().map(|relay| (*relay).to_string()).collect(),
+    }
+}
+
 fn render_sheet_html(url: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
     let body = reqwest::blocking::get(url)?.error_for_status()?.text()?;
     let mut reader = ReaderBuilder::new().has_headers(false).from_reader(body.as_bytes());
@@ -231,11 +327,17 @@ fn render_sheet_page(rows: &[csv::StringRecord]) -> String {
 }
 
 fn render_sync_page(result: &SyncResult) -> String {
+    let nostr = result
+        .nostr_event_id
+        .as_deref()
+        .map(|id| format!("<p>Nostr event: <code>{}</code></p>", escape_html(id)))
+        .unwrap_or_default();
+
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Synced</title></head>\
          <body><h1>Snapshot synced</h1><p>Commit: <code>{}</code></p>\
          <p>SHA-256: <code>{}</code></p>\
-         <p>Rows: {}</p>\
+         <p>Rows: {}</p>{nostr}\
          <p><a href=\"/\">Back</a></p></body></html>",
         escape_html(&result.commit_id),
         escape_html(&result.snapshot.sha256),
