@@ -334,10 +334,10 @@ fn resolve_web_urls(repo: &Repository) -> Vec<Url> {
         let cname = workdir.join("CNAME");
         if let Ok(domain) = fs::read_to_string(cname) {
             let domain = domain.trim();
-            if !domain.is_empty() {
-                if let Ok(url) = Url::parse(&format!("https://{domain}")) {
-                    urls.push(url);
-                }
+            if !domain.is_empty()
+                && let Ok(url) = Url::parse(&format!("https://{domain}"))
+            {
+                urls.push(url);
             }
         }
     }
@@ -348,12 +348,11 @@ fn resolve_web_urls(repo: &Repository) -> Vec<Url> {
 fn resolve_clone_urls(repo: &Repository) -> Vec<Url> {
     let mut urls = Vec::new();
 
-    if let Ok(remote) = repo.find_remote("origin") {
-        if let Some(url) = remote.url().and_then(normalize_clone_url) {
-            if let Ok(parsed) = Url::parse(&url) {
-                urls.push(parsed);
-            }
-        }
+    if let Ok(remote) = repo.find_remote("origin")
+        && let Some(url) = remote.url().and_then(normalize_clone_url)
+        && let Ok(parsed) = Url::parse(&url)
+    {
+        urls.push(parsed);
     }
 
     urls
@@ -655,7 +654,7 @@ fn detect_link(value: &str, header: Option<&str>) -> Option<(String, String)> {
     }
 
     if let Some(url) = normalized_url(raw) {
-        let label = if header.map_or(false, |h| is_twitter_header(h)) {
+        let label = if header.is_some_and(is_twitter_header) {
             twitter_label(raw)
         } else {
             raw.to_string()
@@ -663,12 +662,12 @@ fn detect_link(value: &str, header: Option<&str>) -> Option<(String, String)> {
         return Some((label, url));
     }
 
-    if header.map_or(false, |h| is_twitter_header(h)) {
+    if header.is_some_and(is_twitter_header) {
         let handle = twitter_handle(raw)?;
         return Some((format!("@{handle}"), format!("https://x.com/{handle}")));
     }
 
-    if header.map_or(false, |h| is_domain_header(h)) {
+    if header.is_some_and(is_domain_header) {
         let domain = bare_domain(raw)?;
         return Some((domain.to_string(), format!("https://{domain}")));
     }
