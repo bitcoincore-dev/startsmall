@@ -72,7 +72,7 @@ All flags can alternatively be configured through environment variables. CLI fla
 |----------|-----------------|-------------|
 | `SHEET_CSV_URL` | `--sheet-url` | Google Sheets CSV export URL. |
 | `BIND_ADDR` | `--bind-addr` | Listen address for the HTTP server. |
-| `SYNC_TOKEN` | *(no flag equivalent)* | ****** required to authorize `POST /sync` from non-loopback addresses. See [Authorization](#authorization). |
+| `SYNC_TOKEN` | *(no flag equivalent)* | Secret token required to authorize `POST /sync` from non-loopback addresses. See [Authorization](#authorization). |
 | `NOSTR_RELAYS` | *(no flag equivalent)* | Comma-separated list of Nostr relay WebSocket URLs. Defaults to `wss://relay.damus.io`, `wss://relay.nostr.band`, `wss://nostr.wine`. |
 
 ---
@@ -121,7 +121,7 @@ X-Sync-Token: <token>
 ```
 
 ```http
-Authorization: ******
+Authorization: Bearer <token>
 ```
 
 Token comparison is performed with a constant-time algorithm (via the `subtle` crate) to avoid timing-based attacks.
