@@ -116,7 +116,11 @@ fn route_request(
 }
 
 fn sync_request_authorized(request: &Request) -> bool {
-    if request.remote_addr().ip().is_loopback() {
+    if request
+        .remote_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false)
+    {
         return true;
     }
 
