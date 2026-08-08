@@ -507,7 +507,7 @@ fn render_sheet_page(rows: &[csv::StringRecord]) -> String {
     let mut html = String::from(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Spreadsheet Viewer</title>\
+         <title>startsmall</title>\
          <style>\
          body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:24px;line-height:1.4}\
          table{border-collapse:collapse;width:100%;font-size:14px}\
@@ -521,7 +521,7 @@ fn render_sheet_page(rows: &[csv::StringRecord]) -> String {
          .title-link{text-decoration:none;color:inherit}\
          .actions{margin:0 0 16px 0}\
          button{padding:8px 12px;border:1px solid #d0d7de;background:#f6f8fa;border-radius:6px;cursor:pointer}\
-         </style></head><body><h1><a class=\"title-link\" href=\"https://github.com/bitcoincore-dev/startsmall.git\">Spreadsheet Viewer</a></h1><p><a href=\"https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml\"><img alt=\"Rust\" src=\"https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml/badge.svg\"></a></p><div class=\"actions\"><form method=\"post\" action=\"/sync\"><button type=\"submit\">Sync snapshot to git</button></form></div><div class=\"wrap\"><table>",
+         </style></head><body><h1><a class=\"title-link\" href=\"https://github.com/bitcoincore-dev/startsmall.git\">startsmall</a></h1><p><a href=\"https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml\"><img alt=\"Rust\" src=\"https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml/badge.svg\"></a></p><div class=\"actions\"><form method=\"post\" action=\"/sync\"><button type=\"submit\">Sync snapshot to git</button></form></div><div class=\"wrap\"><table>",
     );
 
     if !parsed.metadata_rows.is_empty() {
