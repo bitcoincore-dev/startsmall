@@ -520,7 +520,7 @@ fn render_sheet_page(rows: &[csv::StringRecord]) -> String {
          .cell-link{text-decoration:none;color:#0969da}\
          .actions{margin:0 0 16px 0}\
          button{padding:8px 12px;border:1px solid #d0d7de;background:#f6f8fa;border-radius:6px;cursor:pointer}\
-         </style></head><body><h1>Spreadsheet Viewer</h1><div class=\"actions\"><form method=\"post\" action=\"/sync\"><button type=\"submit\">Sync snapshot to git</button></form></div><div class=\"wrap\"><table>",
+         </style></head><body><h1>Spreadsheet Viewer</h1><p><a href=\"https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml\"><img alt=\"Rust\" src=\"https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml/badge.svg\"></a></p><div class=\"actions\"><form method=\"post\" action=\"/sync\"><button type=\"submit\">Sync snapshot to git</button></form></div><div class=\"wrap\"><table>",
     );
 
     if !parsed.metadata_rows.is_empty() {
