@@ -1,4 +1,4 @@
-# startsmall
+# [startsmall](https://bitcoincore-dev.github.io/startsmall/)
 
 A Rust tool that snapshots a Google Sheet into a git repository and optionally serves it as a web page. Each sync commit records the CSV content, a SHA-256 hash, and a nanosecond timestamp. Snapshots can also be announced on [Nostr](https://nostr.com/) (plain text note + NIP-34 repository announcement).
 
