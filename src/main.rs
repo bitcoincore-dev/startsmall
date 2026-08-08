@@ -2,6 +2,9 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
@@ -18,6 +21,7 @@ const SNAPSHOT_DIR: &str = "sheet-snapshots";
 const SNAPSHOT_CSV: &str = "sheet-snapshots/google-sheet.csv";
 const SNAPSHOT_META: &str = "sheet-snapshots/google-sheet.meta";
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:0";
+const MAX_CONCURRENT_REQUESTS: usize = 16;
 const DEFAULT_RELAYS: [&str; 3] = [
     "wss://relay.damus.io",
     "wss://relay.nostr.band",
@@ -82,9 +86,30 @@ fn serve(sheet_url: &str, bind_addr: Option<&str>, privkey: Option<&str>) -> Res
     println!("Fetching data from {sheet_url}");
     println!("POST /sync to snapshot the sheet into git");
 
+    let active_requests = Arc::new(AtomicUsize::new(0));
     for request in server.incoming_requests() {
-        let response = route_request(request.method(), request.url(), &request, sheet_url, privkey);
-        let _ = request.respond(response);
+        if active_requests.fetch_add(1, Ordering::AcqRel) >= MAX_CONCURRENT_REQUESTS {
+            active_requests.fetch_sub(1, Ordering::AcqRel);
+            let _ = request.respond(
+                Response::from_string("Server busy").with_status_code(StatusCode(503)),
+            );
+            continue;
+        }
+
+        let active_requests = Arc::clone(&active_requests);
+        let url = sheet_url.to_string();
+        let privkey = privkey.map(ToOwned::to_owned);
+        thread::spawn(move || {
+            let response = route_request(
+                request.method(),
+                request.url(),
+                &request,
+                &url,
+                privkey.as_deref(),
+            );
+            let _ = request.respond(response);
+            active_requests.fetch_sub(1, Ordering::AcqRel);
+        });
     }
 
     Ok(())
@@ -150,7 +175,9 @@ fn sync_request_authorized(request: &Request) -> bool {
 }
 
 fn token_matches(candidate: &str, expected: &str) -> bool {
-    bool::from(candidate.as_bytes().ct_eq(expected.as_bytes()))
+    let candidate_hash = Sha256::digest(candidate.as_bytes());
+    let expected_hash = Sha256::digest(expected.as_bytes());
+    bool::from(candidate_hash.as_slice().ct_eq(expected_hash.as_slice()))
 }
 
 fn sync_once(sheet_url: &str, privkey: Option<&str>) -> Result<(), Box<dyn Error + Send + Sync>> {
