@@ -1,6 +1,6 @@
 # [startsmall](https://bitcoincore-dev.github.io/startsmall/)
 
-[![Rust](https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml/badge.svg)](https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml)
+[![Rust](https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml/badge.svg)](https://github.com/bitcoincore-dev/startsmall/actions/workflows/rust.yml) [![Blame](assets/blame.svg)](https://github.com/bitcoincore-dev/startsmall/blame/main/sheet-snapshots/google-sheet.csv)
 
 A Rust tool that snapshots a Google Sheet into a git repository and optionally serves it as a web page. Each sync commit records the CSV content, a SHA-256 hash, and a nanosecond timestamp. Snapshots can also be announced on [Nostr](https://nostr.com/) (plain text note + NIP-34 repository announcement).
 
