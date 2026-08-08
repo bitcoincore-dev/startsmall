@@ -161,7 +161,7 @@ fn sync_request_authorized(request: &Request) -> bool {
     }
 
     let token = match env::var("SYNC_TOKEN") {
-        Ok(value) if !value.trim().is_empty() => value,
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
         _ => return false,
     };
 
