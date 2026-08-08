@@ -1,6 +1,6 @@
 [package]
 name = "startsmall"
-version = "0.1.0"
+version = "0.0.1"
 repository = "https://github.com/bitcoincore-dev/homebrew-bitcoincore-dev.git"
 homepage = "http://bitcoincore-dev.github.io/startsmall"
 edition = "2024"
