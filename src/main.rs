@@ -2,7 +2,6 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
@@ -10,7 +9,7 @@ use csv::ReaderBuilder;
 use git2::{Repository, Signature};
 use nostr_sdk::prelude::*;
 use sha2::{Digest, Sha256};
-use tiny_http::{Header, Method, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Builder;
 
 const DEFAULT_SHEET_CSV_URL: &str = "https://docs.google.com/spreadsheets/d/1-eGxq2mMoEGwgSpNVL5j2sa6ToojZUZ-Zun8h2oBAR4/export?format=csv&gid=0";
@@ -83,26 +82,66 @@ fn serve(sheet_url: &str, bind_addr: Option<&str>, privkey: Option<&str>) -> Res
     println!("POST /sync to snapshot the sheet into git");
 
     for request in server.incoming_requests() {
-        let url = sheet_url.to_string();
-        let privkey = privkey.map(ToOwned::to_owned);
-        thread::spawn(move || {
-            let response = match (request.method(), request.url()) {
-                (&Method::Get, "/") => match render_sheet_html(&url) {
-                    Ok(html) => html_response(html),
-                    Err(err) => html_response(render_error_page(&err.to_string())),
-                },
-                (&Method::Post, "/sync") => match sync_snapshot(&url, privkey.as_deref()) {
-                    Ok(result) => html_response(render_sync_page(&result)),
-                    Err(err) => html_response(render_error_page(&err.to_string())),
-                },
-                _ => Response::from_string("Not found").with_status_code(StatusCode(404)),
-            };
-
-            let _ = request.respond(response);
-        });
+        let response = route_request(request.method(), request.url(), &request, sheet_url, privkey);
+        let _ = request.respond(response);
     }
 
     Ok(())
+}
+
+fn route_request(
+    method: &Method,
+    path: &str,
+    request: &Request,
+    sheet_url: &str,
+    privkey: Option<&str>,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    match (method, path) {
+        (&Method::Get, "/") => match render_sheet_html(sheet_url) {
+            Ok(html) => html_response(html),
+            Err(err) => html_response(render_error_page(&err.to_string())),
+        },
+        (&Method::Post, "/sync") => {
+            if !sync_request_authorized(request) {
+                return html_response(render_unauthorized_page())
+                    .with_status_code(StatusCode(403));
+            }
+            match sync_snapshot(sheet_url, privkey) {
+                Ok(result) => html_response(render_sync_page(&result)),
+                Err(err) => html_response(render_error_page(&err.to_string())),
+            }
+        }
+        _ => Response::from_string("Not found").with_status_code(StatusCode(404)),
+    }
+}
+
+fn sync_request_authorized(request: &Request) -> bool {
+    if request.remote_addr().ip().is_loopback() {
+        return true;
+    }
+
+    let token = match env::var("SYNC_TOKEN") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return false,
+    };
+
+    request.headers().iter().any(|header| {
+        if header.field.equiv("X-Sync-Token") {
+            return header.value.as_str().trim() == token;
+        }
+
+        if header.field.equiv("Authorization") {
+            return header
+                .value
+                .as_str()
+                .trim()
+                .strip_prefix("Bearer ")
+                .map(|value| value.trim() == token)
+                .unwrap_or(false);
+        }
+
+        false
+    })
 }
 
 fn sync_once(sheet_url: &str, privkey: Option<&str>) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -667,6 +706,12 @@ fn render_error_page(message: &str) -> String {
          <body><h1>Failed to load spreadsheet</h1><pre>{}</pre></body></html>",
         escape_html(message)
     )
+}
+
+fn render_unauthorized_page() -> String {
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Forbidden</title></head>\
+     <body><h1>Sync forbidden</h1><p>Use localhost or provide a valid SYNC_TOKEN.</p></body></html>"
+        .to_string()
 }
 
 fn html_response(body: String) -> Response<std::io::Cursor<Vec<u8>>> {
