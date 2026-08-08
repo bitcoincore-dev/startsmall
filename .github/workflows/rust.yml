@@ -10,9 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always

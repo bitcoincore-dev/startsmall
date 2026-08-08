@@ -2,6 +2,8 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,7 +12,8 @@ use csv::ReaderBuilder;
 use git2::{Repository, Signature};
 use nostr_sdk::prelude::*;
 use sha2::{Digest, Sha256};
-use tiny_http::{Header, Method, Response, Server, StatusCode};
+use subtle::ConstantTimeEq;
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Builder;
 
 const DEFAULT_SHEET_CSV_URL: &str = "https://docs.google.com/spreadsheets/d/1-eGxq2mMoEGwgSpNVL5j2sa6ToojZUZ-Zun8h2oBAR4/export?format=csv&gid=0";
@@ -18,6 +21,7 @@ const SNAPSHOT_DIR: &str = "sheet-snapshots";
 const SNAPSHOT_CSV: &str = "sheet-snapshots/google-sheet.csv";
 const SNAPSHOT_META: &str = "sheet-snapshots/google-sheet.meta";
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:0";
+const MAX_CONCURRENT_REQUESTS: usize = 16;
 const DEFAULT_RELAYS: [&str; 3] = [
     "wss://relay.damus.io",
     "wss://relay.nostr.band",
@@ -33,7 +37,11 @@ struct Args {
     #[arg(long, value_name = "ADDR")]
     bind_addr: Option<String>,
 
-    #[arg(long, value_name = "NSEC_OR_HEX", help = "Nostr private key used to publish sync notes")]
+    #[arg(
+        long,
+        value_name = "NSEC_OR_HEX",
+        help = "Nostr private key used to publish sync notes"
+    )]
     privkey: Option<String>,
 
     #[arg(value_enum, default_value_t = Mode::Serve)]
@@ -52,7 +60,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     match args.mode {
         Mode::Sync => sync_once(&sheet_url, args.privkey.as_deref())?,
-        Mode::Serve => serve(&sheet_url, args.bind_addr.as_deref(), args.privkey.as_deref())?,
+        Mode::Serve => serve(
+            &sheet_url,
+            args.bind_addr.as_deref(),
+            args.privkey.as_deref(),
+        )?,
     }
 
     Ok(())
@@ -71,7 +83,11 @@ fn resolve_bind_addr(value: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string())
 }
 
-fn serve(sheet_url: &str, bind_addr: Option<&str>, privkey: Option<&str>) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn serve(
+    sheet_url: &str,
+    bind_addr: Option<&str>,
+    privkey: Option<&str>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let addr = resolve_bind_addr(bind_addr);
     let server = Server::http(&addr)?;
 
@@ -82,27 +98,96 @@ fn serve(sheet_url: &str, bind_addr: Option<&str>, privkey: Option<&str>) -> Res
     println!("Fetching data from {sheet_url}");
     println!("POST /sync to snapshot the sheet into git");
 
+    let active_requests = Arc::new(AtomicUsize::new(0));
     for request in server.incoming_requests() {
+        if active_requests.fetch_add(1, Ordering::AcqRel) >= MAX_CONCURRENT_REQUESTS {
+            active_requests.fetch_sub(1, Ordering::AcqRel);
+            let _ = request
+                .respond(Response::from_string("Server busy").with_status_code(StatusCode(503)));
+            continue;
+        }
+
+        let active_requests = Arc::clone(&active_requests);
         let url = sheet_url.to_string();
         let privkey = privkey.map(ToOwned::to_owned);
         thread::spawn(move || {
-            let response = match (request.method(), request.url()) {
-                (&Method::Get, "/") => match render_sheet_html(&url) {
-                    Ok(html) => html_response(html),
-                    Err(err) => html_response(render_error_page(&err.to_string())),
-                },
-                (&Method::Post, "/sync") => match sync_snapshot(&url, privkey.as_deref()) {
-                    Ok(result) => html_response(render_sync_page(&result)),
-                    Err(err) => html_response(render_error_page(&err.to_string())),
-                },
-                _ => Response::from_string("Not found").with_status_code(StatusCode(404)),
-            };
-
+            let response = route_request(
+                request.method(),
+                request.url(),
+                &request,
+                &url,
+                privkey.as_deref(),
+            );
             let _ = request.respond(response);
+            active_requests.fetch_sub(1, Ordering::AcqRel);
         });
     }
 
     Ok(())
+}
+
+fn route_request(
+    method: &Method,
+    path: &str,
+    request: &Request,
+    sheet_url: &str,
+    privkey: Option<&str>,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    match (method, path) {
+        (&Method::Get, "/") => match render_sheet_html(sheet_url) {
+            Ok(html) => html_response(html),
+            Err(err) => html_response(render_error_page(&err.to_string())),
+        },
+        (&Method::Post, "/sync") => {
+            if !sync_request_authorized(request) {
+                return html_response(render_unauthorized_page()).with_status_code(StatusCode(403));
+            }
+            match sync_snapshot(sheet_url, privkey) {
+                Ok(result) => html_response(render_sync_page(&result)),
+                Err(err) => html_response(render_error_page(&err.to_string())),
+            }
+        }
+        _ => Response::from_string("Not found").with_status_code(StatusCode(404)),
+    }
+}
+
+fn sync_request_authorized(request: &Request) -> bool {
+    if request
+        .remote_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let token = match env::var("SYNC_TOKEN") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => return false,
+    };
+
+    request.headers().iter().any(|header| {
+        if header.field.equiv("X-Sync-Token") {
+            return token_matches(header.value.as_str().trim(), &token);
+        }
+
+        if header.field.equiv("Authorization") {
+            return header
+                .value
+                .as_str()
+                .trim()
+                .strip_prefix("Bearer ")
+                .map(|value| token_matches(value.trim(), &token))
+                .unwrap_or(false);
+        }
+
+        false
+    })
+}
+
+fn token_matches(candidate: &str, expected: &str) -> bool {
+    let candidate_hash = Sha256::digest(candidate.as_bytes());
+    let expected_hash = Sha256::digest(expected.as_bytes());
+    bool::from(candidate_hash.as_slice().ct_eq(expected_hash.as_slice()))
 }
 
 fn sync_once(sheet_url: &str, privkey: Option<&str>) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -143,7 +228,10 @@ struct SyncResult {
     nip34_event_id: Option<String>,
 }
 
-fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn Error + Send + Sync>> {
+fn sync_snapshot(
+    url: &str,
+    privkey: Option<&str>,
+) -> Result<SyncResult, Box<dyn Error + Send + Sync>> {
     let snapshot = fetch_snapshot(url)?;
     let synced_at_unix_ns = synced_at_unix_ns();
     let repo = Repository::discover(".")?;
@@ -166,7 +254,12 @@ fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn
     let commit = commit_snapshot(&repo, &commit_message)?;
     let (nostr_event_id, nip34_event_id) = match privkey {
         Some(privkey) => (
-            Some(publish_nostr_note(privkey, &snapshot, &commit.commit_id, url)?),
+            Some(publish_nostr_note(
+                privkey,
+                &snapshot,
+                &commit.commit_id,
+                url,
+            )?),
             Some(publish_nip34_repo_announcement(privkey, &repo)?),
         ),
         None => (None, None),
@@ -183,7 +276,9 @@ fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn
 
 fn fetch_snapshot(url: &str) -> Result<Snapshot, Box<dyn Error + Send + Sync>> {
     let body = reqwest::blocking::get(url)?.error_for_status()?.text()?;
-    let mut reader = ReaderBuilder::new().has_headers(false).from_reader(body.as_bytes());
+    let mut reader = ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(body.as_bytes());
 
     let mut rows = 0usize;
     for record in reader.records() {
@@ -239,10 +334,10 @@ fn resolve_web_urls(repo: &Repository) -> Vec<Url> {
         let cname = workdir.join("CNAME");
         if let Ok(domain) = fs::read_to_string(cname) {
             let domain = domain.trim();
-            if !domain.is_empty() {
-                if let Ok(url) = Url::parse(&format!("https://{domain}")) {
-                    urls.push(url);
-                }
+            if !domain.is_empty()
+                && let Ok(url) = Url::parse(&format!("https://{domain}"))
+            {
+                urls.push(url);
             }
         }
     }
@@ -253,12 +348,11 @@ fn resolve_web_urls(repo: &Repository) -> Vec<Url> {
 fn resolve_clone_urls(repo: &Repository) -> Vec<Url> {
     let mut urls = Vec::new();
 
-    if let Ok(remote) = repo.find_remote("origin") {
-        if let Some(url) = remote.url().and_then(normalize_clone_url) {
-            if let Ok(parsed) = Url::parse(&url) {
-                urls.push(parsed);
-            }
-        }
+    if let Ok(remote) = repo.find_remote("origin")
+        && let Some(url) = remote.url().and_then(normalize_clone_url)
+        && let Ok(parsed) = Url::parse(&url)
+    {
+        urls.push(parsed);
     }
 
     urls
@@ -277,11 +371,17 @@ fn normalize_clone_url(remote: &str) -> Option<String> {
     }
 
     if let Some(rest) = remote.strip_prefix("git@github.com:") {
-        return Some(format!("https://github.com/{}", rest.trim_end_matches(".git")));
+        return Some(format!(
+            "https://github.com/{}",
+            rest.trim_end_matches(".git")
+        ));
     }
 
     if let Some(rest) = remote.strip_prefix("ssh://git@github.com/") {
-        return Some(format!("https://github.com/{}", rest.trim_end_matches(".git")));
+        return Some(format!(
+            "https://github.com/{}",
+            rest.trim_end_matches(".git")
+        ));
     }
 
     None
@@ -292,7 +392,10 @@ struct CommitResult {
     changed: bool,
 }
 
-fn commit_snapshot(repo: &Repository, message: &str) -> Result<CommitResult, Box<dyn Error + Send + Sync>> {
+fn commit_snapshot(
+    repo: &Repository,
+    message: &str,
+) -> Result<CommitResult, Box<dyn Error + Send + Sync>> {
     let mut index = repo.index()?;
     index.add_path(Path::new(SNAPSHOT_CSV))?;
     index.add_path(Path::new(SNAPSHOT_META))?;
@@ -317,14 +420,7 @@ fn commit_snapshot(repo: &Repository, message: &str) -> Result<CommitResult, Box
             changed: true,
         })
     } else {
-        let commit_id = repo.commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            message,
-            &tree,
-            &[],
-        )?;
+        let commit_id = repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[])?;
         Ok(CommitResult {
             commit_id: commit_id.to_string(),
             changed: true,
@@ -344,7 +440,10 @@ fn signature(repo: &Repository) -> Result<Signature<'_>, Box<dyn Error + Send + 
         return Ok(sig);
     }
 
-    Ok(Signature::now("Start Small Bot", "start-small-bot@example.com")?)
+    Ok(Signature::now(
+        "Start Small Bot",
+        "start-small-bot@example.com",
+    )?)
 }
 
 fn publish_nostr_note(
@@ -382,13 +481,18 @@ fn resolve_relays() -> Vec<String> {
             .filter(|relay| !relay.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
-        Err(_) => DEFAULT_RELAYS.iter().map(|relay| (*relay).to_string()).collect(),
+        Err(_) => DEFAULT_RELAYS
+            .iter()
+            .map(|relay| (*relay).to_string())
+            .collect(),
     }
 }
 
 fn render_sheet_html(url: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
     let body = reqwest::blocking::get(url)?.error_for_status()?.text()?;
-    let mut reader = ReaderBuilder::new().has_headers(false).from_reader(body.as_bytes());
+    let mut reader = ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(body.as_bytes());
 
     let mut rows = Vec::new();
     for record in reader.records() {
@@ -503,7 +607,9 @@ fn parse_sheet(rows: &[csv::StringRecord]) -> ParsedSheet {
 }
 
 fn is_header_row(cells: &[String]) -> bool {
-    let keywords = ["date", "amount", "grantee", "twitter", "x", "link", "why", "domain", "url"];
+    let keywords = [
+        "date", "amount", "grantee", "twitter", "x", "link", "why", "domain", "url",
+    ];
     let mut score = 0usize;
 
     for cell in cells {
@@ -548,7 +654,7 @@ fn detect_link(value: &str, header: Option<&str>) -> Option<(String, String)> {
     }
 
     if let Some(url) = normalized_url(raw) {
-        let label = if header.map_or(false, |h| is_twitter_header(h)) {
+        let label = if header.is_some_and(is_twitter_header) {
             twitter_label(raw)
         } else {
             raw.to_string()
@@ -556,12 +662,12 @@ fn detect_link(value: &str, header: Option<&str>) -> Option<(String, String)> {
         return Some((label, url));
     }
 
-    if header.map_or(false, |h| is_twitter_header(h)) {
+    if header.is_some_and(is_twitter_header) {
         let handle = twitter_handle(raw)?;
         return Some((format!("@{handle}"), format!("https://x.com/{handle}")));
     }
 
-    if header.map_or(false, |h| is_domain_header(h)) {
+    if header.is_some_and(is_domain_header) {
         let domain = bare_domain(raw)?;
         return Some((domain.to_string(), format!("https://{domain}")));
     }
@@ -669,9 +775,18 @@ fn render_error_page(message: &str) -> String {
     )
 }
 
+fn render_unauthorized_page() -> String {
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Forbidden</title></head>\
+     <body><h1>Sync forbidden</h1><p>Use localhost or provide a valid SYNC_TOKEN.</p></body></html>"
+        .to_string()
+}
+
 fn html_response(body: String) -> Response<std::io::Cursor<Vec<u8>>> {
     let mut response = Response::from_string(body);
-    if let Ok(header) = Header::from_bytes(b"Content-Type".as_slice(), b"text/html; charset=utf-8".as_slice()) {
+    if let Ok(header) = Header::from_bytes(
+        b"Content-Type".as_slice(),
+        b"text/html; charset=utf-8".as_slice(),
+    ) {
         response = response.with_header(header);
     }
     response
