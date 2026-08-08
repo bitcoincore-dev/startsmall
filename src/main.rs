@@ -9,6 +9,7 @@ use csv::ReaderBuilder;
 use git2::{Repository, Signature};
 use nostr_sdk::prelude::*;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Builder;
 
@@ -131,7 +132,7 @@ fn sync_request_authorized(request: &Request) -> bool {
 
     request.headers().iter().any(|header| {
         if header.field.equiv("X-Sync-Token") {
-            return header.value.as_str().trim() == token;
+            return token_matches(header.value.as_str().trim(), &token);
         }
 
         if header.field.equiv("Authorization") {
@@ -140,12 +141,16 @@ fn sync_request_authorized(request: &Request) -> bool {
                 .as_str()
                 .trim()
                 .strip_prefix("Bearer ")
-                .map(|value| value.trim() == token)
+                .map(|value| token_matches(value.trim(), &token))
                 .unwrap_or(false);
         }
 
         false
     })
+}
+
+fn token_matches(candidate: &str, expected: &str) -> bool {
+    bool::from(candidate.as_bytes().ct_eq(expected.as_bytes()))
 }
 
 fn sync_once(sheet_url: &str, privkey: Option<&str>) -> Result<(), Box<dyn Error + Send + Sync>> {

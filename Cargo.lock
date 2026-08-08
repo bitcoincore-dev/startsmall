@@ -1595,6 +1595,7 @@ dependencies = [
  "nostr-sdk",
  "reqwest",
  "sha2",
+ "subtle",
  "tiny_http",
  "tokio",
 ]
