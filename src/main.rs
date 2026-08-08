@@ -2,8 +2,8 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,7 +37,11 @@ struct Args {
     #[arg(long, value_name = "ADDR")]
     bind_addr: Option<String>,
 
-    #[arg(long, value_name = "NSEC_OR_HEX", help = "Nostr private key used to publish sync notes")]
+    #[arg(
+        long,
+        value_name = "NSEC_OR_HEX",
+        help = "Nostr private key used to publish sync notes"
+    )]
     privkey: Option<String>,
 
     #[arg(value_enum, default_value_t = Mode::Serve)]
@@ -56,7 +60,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     match args.mode {
         Mode::Sync => sync_once(&sheet_url, args.privkey.as_deref())?,
-        Mode::Serve => serve(&sheet_url, args.bind_addr.as_deref(), args.privkey.as_deref())?,
+        Mode::Serve => serve(
+            &sheet_url,
+            args.bind_addr.as_deref(),
+            args.privkey.as_deref(),
+        )?,
     }
 
     Ok(())
@@ -75,7 +83,11 @@ fn resolve_bind_addr(value: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string())
 }
 
-fn serve(sheet_url: &str, bind_addr: Option<&str>, privkey: Option<&str>) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn serve(
+    sheet_url: &str,
+    bind_addr: Option<&str>,
+    privkey: Option<&str>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let addr = resolve_bind_addr(bind_addr);
     let server = Server::http(&addr)?;
 
@@ -90,9 +102,8 @@ fn serve(sheet_url: &str, bind_addr: Option<&str>, privkey: Option<&str>) -> Res
     for request in server.incoming_requests() {
         if active_requests.fetch_add(1, Ordering::AcqRel) >= MAX_CONCURRENT_REQUESTS {
             active_requests.fetch_sub(1, Ordering::AcqRel);
-            let _ = request.respond(
-                Response::from_string("Server busy").with_status_code(StatusCode(503)),
-            );
+            let _ = request
+                .respond(Response::from_string("Server busy").with_status_code(StatusCode(503)));
             continue;
         }
 
@@ -129,8 +140,7 @@ fn route_request(
         },
         (&Method::Post, "/sync") => {
             if !sync_request_authorized(request) {
-                return html_response(render_unauthorized_page())
-                    .with_status_code(StatusCode(403));
+                return html_response(render_unauthorized_page()).with_status_code(StatusCode(403));
             }
             match sync_snapshot(sheet_url, privkey) {
                 Ok(result) => html_response(render_sync_page(&result)),
@@ -218,7 +228,10 @@ struct SyncResult {
     nip34_event_id: Option<String>,
 }
 
-fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn Error + Send + Sync>> {
+fn sync_snapshot(
+    url: &str,
+    privkey: Option<&str>,
+) -> Result<SyncResult, Box<dyn Error + Send + Sync>> {
     let snapshot = fetch_snapshot(url)?;
     let synced_at_unix_ns = synced_at_unix_ns();
     let repo = Repository::discover(".")?;
@@ -241,7 +254,12 @@ fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn
     let commit = commit_snapshot(&repo, &commit_message)?;
     let (nostr_event_id, nip34_event_id) = match privkey {
         Some(privkey) => (
-            Some(publish_nostr_note(privkey, &snapshot, &commit.commit_id, url)?),
+            Some(publish_nostr_note(
+                privkey,
+                &snapshot,
+                &commit.commit_id,
+                url,
+            )?),
             Some(publish_nip34_repo_announcement(privkey, &repo)?),
         ),
         None => (None, None),
@@ -258,7 +276,9 @@ fn sync_snapshot(url: &str, privkey: Option<&str>) -> Result<SyncResult, Box<dyn
 
 fn fetch_snapshot(url: &str) -> Result<Snapshot, Box<dyn Error + Send + Sync>> {
     let body = reqwest::blocking::get(url)?.error_for_status()?.text()?;
-    let mut reader = ReaderBuilder::new().has_headers(false).from_reader(body.as_bytes());
+    let mut reader = ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(body.as_bytes());
 
     let mut rows = 0usize;
     for record in reader.records() {
@@ -352,11 +372,17 @@ fn normalize_clone_url(remote: &str) -> Option<String> {
     }
 
     if let Some(rest) = remote.strip_prefix("git@github.com:") {
-        return Some(format!("https://github.com/{}", rest.trim_end_matches(".git")));
+        return Some(format!(
+            "https://github.com/{}",
+            rest.trim_end_matches(".git")
+        ));
     }
 
     if let Some(rest) = remote.strip_prefix("ssh://git@github.com/") {
-        return Some(format!("https://github.com/{}", rest.trim_end_matches(".git")));
+        return Some(format!(
+            "https://github.com/{}",
+            rest.trim_end_matches(".git")
+        ));
     }
 
     None
@@ -367,7 +393,10 @@ struct CommitResult {
     changed: bool,
 }
 
-fn commit_snapshot(repo: &Repository, message: &str) -> Result<CommitResult, Box<dyn Error + Send + Sync>> {
+fn commit_snapshot(
+    repo: &Repository,
+    message: &str,
+) -> Result<CommitResult, Box<dyn Error + Send + Sync>> {
     let mut index = repo.index()?;
     index.add_path(Path::new(SNAPSHOT_CSV))?;
     index.add_path(Path::new(SNAPSHOT_META))?;
@@ -392,14 +421,7 @@ fn commit_snapshot(repo: &Repository, message: &str) -> Result<CommitResult, Box
             changed: true,
         })
     } else {
-        let commit_id = repo.commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            message,
-            &tree,
-            &[],
-        )?;
+        let commit_id = repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[])?;
         Ok(CommitResult {
             commit_id: commit_id.to_string(),
             changed: true,
@@ -419,7 +441,10 @@ fn signature(repo: &Repository) -> Result<Signature<'_>, Box<dyn Error + Send + 
         return Ok(sig);
     }
 
-    Ok(Signature::now("Start Small Bot", "start-small-bot@example.com")?)
+    Ok(Signature::now(
+        "Start Small Bot",
+        "start-small-bot@example.com",
+    )?)
 }
 
 fn publish_nostr_note(
@@ -457,13 +482,18 @@ fn resolve_relays() -> Vec<String> {
             .filter(|relay| !relay.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
-        Err(_) => DEFAULT_RELAYS.iter().map(|relay| (*relay).to_string()).collect(),
+        Err(_) => DEFAULT_RELAYS
+            .iter()
+            .map(|relay| (*relay).to_string())
+            .collect(),
     }
 }
 
 fn render_sheet_html(url: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
     let body = reqwest::blocking::get(url)?.error_for_status()?.text()?;
-    let mut reader = ReaderBuilder::new().has_headers(false).from_reader(body.as_bytes());
+    let mut reader = ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(body.as_bytes());
 
     let mut rows = Vec::new();
     for record in reader.records() {
@@ -578,7 +608,9 @@ fn parse_sheet(rows: &[csv::StringRecord]) -> ParsedSheet {
 }
 
 fn is_header_row(cells: &[String]) -> bool {
-    let keywords = ["date", "amount", "grantee", "twitter", "x", "link", "why", "domain", "url"];
+    let keywords = [
+        "date", "amount", "grantee", "twitter", "x", "link", "why", "domain", "url",
+    ];
     let mut score = 0usize;
 
     for cell in cells {
@@ -752,7 +784,10 @@ fn render_unauthorized_page() -> String {
 
 fn html_response(body: String) -> Response<std::io::Cursor<Vec<u8>>> {
     let mut response = Response::from_string(body);
-    if let Ok(header) = Header::from_bytes(b"Content-Type".as_slice(), b"text/html; charset=utf-8".as_slice()) {
+    if let Ok(header) = Header::from_bytes(
+        b"Content-Type".as_slice(),
+        b"text/html; charset=utf-8".as_slice(),
+    ) {
         response = response.with_header(header);
     }
     response
