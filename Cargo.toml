@@ -3,8 +3,8 @@ name = "startsmall"
 version = "0.0.2"
 description = "A Rust tool that snapshots a Google Sheet into a git repository and optionally serves it as a web page."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/bitcoincore-dev/homebrew-bitcoincore-dev.git"
-homepage = "http://bitcoincore-dev.github.io/startsmall"
+repository = "https://github.com/bitcoincore-dev/startsmall.git"
+homepage = "https://bitcoincore-dev.github.io/startsmall"
 edition = "2024"
 
 [dependencies]
